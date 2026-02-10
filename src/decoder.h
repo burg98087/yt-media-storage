@@ -81,13 +81,15 @@ public:
 
     [[nodiscard]] static bool validate_packet_crc(const DecodedPacket &packet);
 
+    [[nodiscard]] static bool validate_raw_packet_crc(std::span<const std::byte> packet_data);
+
     std::optional<ChunkDecodeResult> process_packet(std::span<const std::byte> packet_data);
 
     std::optional<ChunkDecodeResult> process_packet(const DecodedPacket &packet);
 
     [[nodiscard]] bool is_chunk_complete(uint32_t chunk_index) const;
 
-    [[nodiscard]] std::optional<std::vector<std::byte> > get_chunk_data(uint32_t chunk_index) const;
+    [[nodiscard]] std::optional<std::vector<std::byte>> get_chunk_data(uint32_t chunk_index) const;
 
     [[nodiscard]] std::optional<FileId> file_id() const { return id; }
 
@@ -97,11 +99,11 @@ public:
 
     [[nodiscard]] std::vector<uint32_t> completed_chunk_indices() const;
 
-    [[nodiscard]] std::optional<std::vector<std::byte> > assemble_file(uint32_t expected_chunks) const;
+    [[nodiscard]] std::optional<std::vector<std::byte>> assemble_file(uint32_t expected_chunks) const;
 
 private:
     std::optional<FileId> id;
     std::map<uint32_t, ChunkDecoder> active_decoders;
-    std::map<uint32_t, std::vector<std::byte> > completed_chunks;
+    std::map<uint32_t, std::vector<std::byte>> completed_chunks;
     size_t total_packets_ = 0;
 };

@@ -21,7 +21,7 @@
 static std::string format_size(const std::uintmax_t bytes) {
     const char *units[] = {"B", "KB", "MB", "GB"};
     int unit = 0;
-    double size = static_cast<double>(bytes);
+    auto size = static_cast<double>(bytes);
     while (size >= 1024 && unit < 3) {
         size /= 1024;
         ++unit;
@@ -41,8 +41,8 @@ static std::array<std::byte, 16> make_file_id() {
 
 static void print_usage(const char *program) {
     std::cerr << "Usage:\n"
-              << "  " << program << " encode --input <file> --output <video>\n"
-              << "  " << program << " decode --input <video> --output <file>\n";
+            << "  " << program << " encode --input <file> --output <video>\n"
+            << "  " << program << " decode --input <video> --output <file>\n";
 }
 
 static int do_encode(const std::string &input_path, const std::string &output_path) {
@@ -55,26 +55,33 @@ static int do_encode(const std::string &input_path, const std::string &output_pa
     std::cout << "Input: " << input_path << " (" << format_size(input_size) << ")\n";
 
     const auto chunked = chunkFile(input_path.c_str());
-    std::cout << "Chunks: " << chunked.chunks.size() << "\n";
+    const std::size_t num_chunks = chunked.chunks.size();
+    std::cout << "Chunks: " << num_chunks << "\n";
 
     const Encoder encoder(make_file_id());
-    const std::size_t num_chunks = chunked.chunks.size();
-    std::vector<Packet> packets;
+    std::vector<std::vector<Packet> > all_chunk_packets(num_chunks);
 
-    for (std::size_t i = 0; i < num_chunks; ++i) {
-        const std::span<const std::byte> chunk_data = chunkSpan(chunked, i);
-        const bool is_last = (i == num_chunks - 1);
+#pragma omp parallel for schedule(dynamic)
+    for (int i = 0; i < static_cast<int>(num_chunks); ++i) {
+        const auto chunk_data = chunkSpan(chunked, static_cast<std::size_t>(i));
+        const bool is_last = (i == static_cast<int>(num_chunks) - 1);
         auto [chunk_packets, manifest] =
-            encoder.encode_chunk(static_cast<uint32_t>(i), chunk_data, is_last);
-        for (auto &pkt : chunk_packets) {
-            packets.push_back(std::move(pkt));
-        }
+                encoder.encode_chunk(static_cast<uint32_t>(i), chunk_data, is_last);
+        all_chunk_packets[i] = std::move(chunk_packets);
     }
 
-    std::cout << "Packets: " << packets.size() << "\n";
+    std::size_t total_packets = 0;
+    for (const auto &packets: all_chunk_packets)
+        total_packets += packets.size();
+    std::cout << "Packets: " << total_packets << "\n";
+
     try {
         VideoEncoder video_encoder(output_path);
-        video_encoder.encode_packets(packets);
+        for (auto &packets: all_chunk_packets) {
+            video_encoder.encode_packets(packets);
+            packets.clear();
+            packets.shrink_to_fit();
+        }
         video_encoder.finalize();
     } catch (const std::exception &e) {
         std::cerr << "Error writing video: " << e.what() << "\n";
@@ -83,7 +90,7 @@ static int do_encode(const std::string &input_path, const std::string &output_pa
 
     const auto video_size = std::filesystem::file_size(output_path);
     std::cout << "\nEncode complete: " << format_size(input_size) << " -> "
-              << format_size(video_size) << "\n";
+            << format_size(video_size) << "\n";
     std::cout << "Written to: " << output_path << "\n";
 
     return 0;
@@ -98,7 +105,9 @@ static int do_decode(const std::string &input_path, const std::string &output_pa
     const auto video_size = std::filesystem::file_size(input_path);
     std::cout << "Input: " << input_path << " (" << format_size(video_size) << ")\n";
 
-    std::vector<Packet> packets;
+    Decoder decoder;
+    std::size_t total_extracted = 0;
+    std::size_t decoded_chunks = 0;
     uint32_t max_chunk_index = 0;
     bool found_last_chunk = false;
     uint32_t last_chunk_index = 0;
@@ -107,18 +116,19 @@ static int do_decode(const std::string &input_path, const std::string &output_pa
         VideoDecoder video_decoder(input_path);
         const int64_t total = video_decoder.total_frames();
         std::cout << "Total frames: "
-                  << (total >= 0 ? std::to_string(total) : "unknown") << "\n";
+                << (total >= 0 ? std::to_string(total) : "unknown") << "\n";
 
         std::size_t valid_frames = 0;
 
         while (!video_decoder.is_eof()) {
-            auto frame_packets = video_decoder.decode_next_frame();
-            if (!frame_packets.empty()) {
+            if (auto frame_packets = video_decoder.decode_next_frame(); !frame_packets.empty()) {
                 ++valid_frames;
-                for (auto &pkt_data : frame_packets) {
+                for (auto &pkt_data: frame_packets) {
+                    ++total_extracted;
+
                     if (pkt_data.size() >= HEADER_SIZE) {
                         const auto flags =
-                            static_cast<uint8_t>(pkt_data[FLAGS_OFF]);
+                                static_cast<uint8_t>(pkt_data[FLAGS_OFF]);
                         uint32_t chunk_idx = 0;
                         std::memcpy(&chunk_idx,
                                     pkt_data.data() + CHUNK_INDEX_OFF,
@@ -131,21 +141,23 @@ static int do_decode(const std::string &input_path, const std::string &output_pa
                         }
                     }
 
-                    Packet pkt;
-                    pkt.bytes = std::move(pkt_data);
-                    packets.push_back(std::move(pkt));
+                    const std::span<const std::byte> data(pkt_data.data(), pkt_data.size());
+                    if (auto result = decoder.process_packet(data);
+                        result && result->success) {
+                        ++decoded_chunks;
+                    }
                 }
             }
         }
 
         std::cout << "Valid frames: " << valid_frames << "\n";
-        std::cout << "Packets extracted: " << packets.size() << "\n";
+        std::cout << "Packets extracted: " << total_extracted << "\n";
     } catch (const std::exception &e) {
         std::cerr << "Error reading video: " << e.what() << "\n";
         return 1;
     }
 
-    if (packets.empty()) {
+    if (total_extracted == 0) {
         std::cerr << "No packets could be extracted from the video\n";
         return 1;
     }
@@ -157,22 +169,11 @@ static int do_decode(const std::string &input_path, const std::string &output_pa
         expected_chunks = max_chunk_index + 1;
     }
 
-    Decoder decoder;
-    std::size_t decoded_chunks = 0;
-
-    for (const auto &pkt : packets) {
-        const std::span<const std::byte> data(pkt.bytes.data(), pkt.bytes.size());
-        if (auto result = decoder.process_packet(data);
-            result && result->success) {
-            ++decoded_chunks;
-        }
-    }
-
     std::cout << "Chunks decoded: " << decoded_chunks << "/" << expected_chunks << "\n";
 
     if (decoded_chunks < expected_chunks) {
         std::cerr << "Error: only decoded " << decoded_chunks << " of "
-                  << expected_chunks << " chunks\n";
+                << expected_chunks << " chunks\n";
         return 1;
     }
 
@@ -193,13 +194,13 @@ static int do_decode(const std::string &input_path, const std::string &output_pa
     out.close();
 
     std::cout << "\nDecode complete: " << format_size(video_size) << " -> "
-              << format_size(assembled->size()) << "\n";
+            << format_size(assembled->size()) << "\n";
     std::cout << "Written to: " << output_path << "\n";
 
     return 0;
 }
 
-int main(int argc, char *argv[]) {
+int main(const int argc, char *argv[]) {
     if (argc < 2) {
         print_usage(argv[0]);
         return 1;
@@ -217,8 +218,7 @@ int main(int argc, char *argv[]) {
     std::string output_path;
 
     for (int i = 2; i < argc; ++i) {
-        const std::string arg = argv[i];
-        if ((arg == "--input" || arg == "-i") && i + 1 < argc) {
+        if (const std::string arg = argv[i]; (arg == "--input" || arg == "-i") && i + 1 < argc) {
             input_path = argv[++i];
         } else if ((arg == "--output" || arg == "-o") && i + 1 < argc) {
             output_path = argv[++i];

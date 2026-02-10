@@ -3,6 +3,7 @@
 #include "dct_common.h"
 
 #include <algorithm>
+#include <cstring>
 #include <iostream>
 #include <stdexcept>
 
@@ -129,8 +130,8 @@ void VideoEncoder::init_encoder(const std::string &output_path) {
         throw std::runtime_error("Failed to allocate packet");
     }
 
-    gray_buffer.resize(static_cast<std::size_t>(FRAME_WIDTH) * FRAME_HEIGHT);
     if (codec_ctx->pix_fmt != AV_PIX_FMT_GRAY8) {
+        gray_buffer.resize(static_cast<std::size_t>(FRAME_WIDTH) * FRAME_HEIGHT);
         sws_ctx = sws_getContext(
             FRAME_WIDTH, FRAME_HEIGHT, AV_PIX_FMT_GRAY8,
             FRAME_WIDTH, FRAME_HEIGHT, codec_ctx->pix_fmt,
@@ -140,6 +141,9 @@ void VideoEncoder::init_encoder(const std::string &output_path) {
             throw std::runtime_error("Failed to create swscale context");
         }
     }
+
+    layout_ = compute_frame_layout();
+    frame_data_buffer.reserve(layout_.bytes_per_frame);
 
     ret = avio_open(&format_ctx->pb, output_path.c_str(), AVIO_FLAG_WRITE);
     if (ret < 0) {
@@ -159,17 +163,29 @@ int VideoEncoder::packets_per_frame() {
 }
 
 void VideoEncoder::embed_data_in_frame(const std::vector<std::byte> &data) {
-    const auto layout = compute_frame_layout();
     const auto &[patterns] = get_precomputed_blocks();
-    std::memset(gray_buffer.data(), 128, gray_buffer.size());
 
     const std::size_t total_bits = data.size() * 8;
-    const int total_blocks = layout.blocks_per_row * layout.blocks_per_col;
+    const int total_blocks = layout_.blocks_per_row * layout_.blocks_per_col;
     const int active_blocks = static_cast<int>(
         std::min(static_cast<std::size_t>(total_blocks),
                  (total_bits + BITS_PER_BLOCK - 1) / BITS_PER_BLOCK));
     const auto *src = reinterpret_cast<const uint8_t *>(data.data());
-    const int blocks_per_row = layout.blocks_per_row;
+    const int blocks_per_row = layout_.blocks_per_row;
+
+    uint8_t *dst_base;
+    int dst_stride;
+    if (sws_ctx) {
+        dst_base = gray_buffer.data();
+        dst_stride = FRAME_WIDTH;
+        std::memset(dst_base, 128, gray_buffer.size());
+    } else {
+        av_frame_make_writable(frame);
+        dst_base = frame->data[0];
+        dst_stride = frame->linesize[0];
+        for (int y = 0; y < FRAME_HEIGHT; ++y)
+            std::memset(dst_base + y * dst_stride, 128, FRAME_WIDTH);
+    }
 
 #pragma omp parallel for schedule(static)
     for (int block_idx = 0; block_idx < active_blocks; ++block_idx) {
@@ -194,7 +210,7 @@ void VideoEncoder::embed_data_in_frame(const std::vector<std::byte> &data) {
 
         const auto &block = patterns[pattern];
         for (int y = 0; y < 8; ++y) {
-            std::memcpy(&gray_buffer[(base_y + y) * FRAME_WIDTH + base_x],
+            std::memcpy(dst_base + (base_y + y) * dst_stride + base_x,
                         block[y], 8);
         }
     }
@@ -204,12 +220,6 @@ void VideoEncoder::embed_data_in_frame(const std::vector<std::byte> &data) {
         constexpr int src_linesize[1] = {FRAME_WIDTH};
         sws_scale(sws_ctx, src_data, src_linesize, 0, FRAME_HEIGHT,
                   frame->data, frame->linesize);
-    } else {
-        for (int y = 0; y < FRAME_HEIGHT; ++y) {
-            std::memcpy(frame->data[0] + y * frame->linesize[0],
-                        gray_buffer.data() + y * FRAME_WIDTH,
-                        FRAME_WIDTH);
-        }
     }
 }
 
@@ -252,8 +262,7 @@ void VideoEncoder::add_packet(const Packet &packet) {
         throw std::runtime_error("Encoder already finalized");
     }
 
-    const auto layout = compute_frame_layout();
-    if (const auto max_bytes = static_cast<std::size_t>(layout.bytes_per_frame);
+    if (const auto max_bytes = static_cast<std::size_t>(layout_.bytes_per_frame);
         frame_data_buffer.size() + packet.bytes.size() > max_bytes) {
         flush_frame_buffer();
     }

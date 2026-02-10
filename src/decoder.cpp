@@ -175,6 +175,25 @@ std::optional<DecodedPacket> Decoder::parse_packet(const std::span<const std::by
     return result;
 }
 
+bool Decoder::validate_raw_packet_crc(const std::span<const std::byte> packet_data) {
+    if (packet_data.size() < HEADER_SIZE) {
+        return false;
+    }
+
+    const uint16_t symbol_size = readU16LE(packet_data, SYMBOL_SIZE_OFF);
+    if (packet_data.size() < HEADER_SIZE + symbol_size) {
+        return false;
+    }
+
+    const uint32_t stored_crc = readU32LE(packet_data, CRC_OFF);
+
+    const auto header_span = packet_data.subspan(0, HEADER_SIZE);
+    const auto payload_span = packet_data.subspan(HEADER_SIZE, symbol_size);
+    const uint32_t computed_crc = packet_crc32c(header_span, payload_span, CRC_OFF, CRC_SIZE);
+
+    return stored_crc == computed_crc;
+}
+
 bool Decoder::validate_packet_crc(const DecodedPacket &packet) {
     std::vector<std::byte> header(HEADER_SIZE);
     const std::span buf(header.data(), header.size());
@@ -212,11 +231,51 @@ bool Decoder::validate_packet_crc(const DecodedPacket &packet) {
 }
 
 std::optional<ChunkDecodeResult> Decoder::process_packet(const std::span<const std::byte> packet_data) {
+    ++total_packets_;
+
+    if (!validate_raw_packet_crc(packet_data)) {
+        return std::nullopt;
+    }
+
     const auto parsed = parse_packet(packet_data);
     if (!parsed) {
         return std::nullopt;
     }
-    return process_packet(*parsed);
+
+    const PacketHeader &hdr = parsed->header;
+    if (!id) {
+        id = hdr.file_id;
+    }
+
+    if (completed_chunks.contains(hdr.chunk_index)) {
+        return std::nullopt;
+    }
+
+    auto it = active_decoders.find(hdr.chunk_index);
+    if (it == active_decoders.end()) {
+        auto [inserted_it, success] = active_decoders.emplace(
+            std::piecewise_construct,
+            std::forward_as_tuple(hdr.chunk_index),
+            std::forward_as_tuple(hdr.chunk_index, hdr.chunk_size, hdr.k, hdr.symbol_size)
+        );
+        it = inserted_it;
+    }
+
+    ChunkDecoder &decoder = it->second;
+    if (const std::span payloadSpan(parsed->payload.data(), parsed->payload.size()); decoder.add_packet(
+        hdr.esi, payloadSpan)) {
+        ChunkDecodeResult result;
+        result.chunk_index = hdr.chunk_index;
+        result.data = decoder.get_decoded_data();
+        result.sha256 = sha256(std::span<const std::byte>(result.data.data(), result.data.size()));
+        result.success = true;
+        completed_chunks[hdr.chunk_index] = result.data;
+        active_decoders.erase(it);
+
+        return result;
+    }
+
+    return std::nullopt;
 }
 
 std::optional<ChunkDecodeResult> Decoder::process_packet(const DecodedPacket &packet) {

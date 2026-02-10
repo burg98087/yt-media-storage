@@ -57,3 +57,14 @@ constexpr size_t ESI_OFF = K_OFF + K_SIZE;
 constexpr size_t PAYLOAD_LEN_OFF = ESI_OFF + ESI_SIZE;
 constexpr size_t CRC_OFF = PAYLOAD_LEN_OFF + PAYLOAD_LEN_SIZE;
 constexpr size_t HEADER_SIZE = CRC_OFF + CRC_SIZE;
+
+// Frame Layout
+struct FrameLayout {
+    int frame_width;
+    int frame_height;
+    int blocks_per_row;
+    int blocks_per_col;
+    int total_blocks;
+    int bits_per_frame;
+    int bytes_per_frame;
+};

@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstddef>
-#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -13,17 +12,8 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 
+#include "configuration.h"
 #include "encoder.h"
-
-struct FrameLayout {
-    int frame_width;
-    int frame_height;
-    int blocks_per_row;
-    int blocks_per_col;
-    int total_blocks;
-    int bits_per_frame;
-    int bytes_per_frame;
-};
 
 FrameLayout compute_frame_layout();
 
@@ -63,6 +53,7 @@ private:
 
     std::vector<uint8_t> gray_buffer;
     std::vector<std::byte> frame_data_buffer;
+    FrameLayout layout_{};
     int64_t frame_index = 0;
     bool finalized = false;
 

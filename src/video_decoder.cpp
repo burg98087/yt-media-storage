@@ -3,6 +3,7 @@
 #include "configuration.h"
 #include "dct_common.h"
 
+#include <cstring>
 #include <stdexcept>
 
 VideoDecoder::VideoDecoder(const std::string &input_path) {
@@ -62,33 +63,40 @@ void VideoDecoder::init_decoder(const std::string &input_path) {
     }
 
     frame_ = av_frame_alloc();
-    gray_frame_ = av_frame_alloc();
     av_packet_ = av_packet_alloc();
 
-    if (!frame_ || !gray_frame_ || !av_packet_) {
+    if (!frame_ || !av_packet_) {
         throw std::runtime_error("Failed to allocate frame/packet");
     }
+    is_gray8_ = (codec_ctx_->pix_fmt == AV_PIX_FMT_GRAY8);
 
-    gray_buffer_.resize(static_cast<std::size_t>(FRAME_WIDTH) * FRAME_HEIGHT);
+    if (!is_gray8_) {
+        gray_frame_ = av_frame_alloc();
+        if (!gray_frame_) {
+            throw std::runtime_error("Failed to allocate gray frame");
+        }
 
-    gray_frame_->format = AV_PIX_FMT_GRAY8;
-    gray_frame_->width = codec_ctx_->width;
-    gray_frame_->height = codec_ctx_->height;
+        gray_frame_->format = AV_PIX_FMT_GRAY8;
+        gray_frame_->width = codec_ctx_->width;
+        gray_frame_->height = codec_ctx_->height;
 
-    ret = av_frame_get_buffer(gray_frame_, 0);
-    if (ret < 0) {
-        throw std::runtime_error("Failed to allocate gray frame buffer");
+        ret = av_frame_get_buffer(gray_frame_, 0);
+        if (ret < 0) {
+            throw std::runtime_error("Failed to allocate gray frame buffer");
+        }
+
+        sws_ctx_ = sws_getContext(
+            codec_ctx_->width, codec_ctx_->height, codec_ctx_->pix_fmt,
+            codec_ctx_->width, codec_ctx_->height, AV_PIX_FMT_GRAY8,
+            SWS_POINT, nullptr, nullptr, nullptr
+        );
+
+        if (!sws_ctx_) {
+            throw std::runtime_error("Failed to create swscale context");
+        }
     }
 
-    sws_ctx_ = sws_getContext(
-        codec_ctx_->width, codec_ctx_->height, codec_ctx_->pix_fmt,
-        codec_ctx_->width, codec_ctx_->height, AV_PIX_FMT_GRAY8,
-        SWS_POINT, nullptr, nullptr, nullptr
-    );
-
-    if (!sws_ctx_) {
-        throw std::runtime_error("Failed to create swscale context");
-    }
+    layout_ = compute_frame_layout();
 }
 
 int64_t VideoDecoder::total_frames() const {
@@ -107,14 +115,22 @@ int64_t VideoDecoder::total_frames() const {
 }
 
 std::vector<std::byte> VideoDecoder::extract_data_from_frame() const {
-    const auto layout = compute_frame_layout();
-    const auto &[vectors] = get_decoder_projections();
+    const auto &proj = get_decoder_projections();
 
-    const int blocks_per_row = layout.blocks_per_row;
-    const int total_blocks = layout.total_blocks;
+    const int blocks_per_row = layout_.blocks_per_row;
+    const int total_blocks = layout_.total_blocks;
     constexpr int blocks_per_byte = 8 / BITS_PER_BLOCK;
 
     const int total_bytes = total_blocks / blocks_per_byte;
+    const uint8_t *src_base;
+    int src_stride;
+    if (is_gray8_) {
+        src_base = frame_->data[0];
+        src_stride = frame_->linesize[0];
+    } else {
+        src_base = gray_frame_->data[0];
+        src_stride = gray_frame_->linesize[0];
+    }
 
     std::vector data(total_bytes, std::byte{0});
     auto *out = reinterpret_cast<uint8_t *>(data.data());
@@ -130,21 +146,15 @@ std::vector<std::byte> VideoDecoder::extract_data_from_frame() const {
             const int base_x = block_col * 8;
             const int base_y = block_row * 8;
 
-            float block_flat[64];
+            alignas(32) float block_flat[64];
             for (int y = 0; y < 8; ++y) {
-                const int row_offset = (base_y + y) * FRAME_WIDTH + base_x;
-                for (int x = 0; x < 8; ++x) {
-                    block_flat[y * 8 + x] = static_cast<float>(
-                        gray_buffer_[row_offset + x]);
-                }
+                const uint8_t *row = src_base + (base_y + y) * src_stride + base_x;
+                for (int x = 0; x < 8; ++x)
+                    block_flat[y * 8 + x] = static_cast<float>(row[x]);
             }
 
             for (int b = 0; b < BITS_PER_BLOCK; ++b) {
-                float sum = 0.0f;
-                const float *pv = vectors[b];
-                for (int i = 0; i < 64; ++i) {
-                    sum += block_flat[i] * pv[i];
-                }
+                const float sum = dot_product_64(block_flat, proj.vectors[b]);
                 current_byte = (current_byte << 1) | (sum > 0.0f ? 1 : 0);
             }
         }
@@ -210,12 +220,9 @@ std::vector<std::vector<std::byte> > VideoDecoder::decode_next_frame() {
             throw std::runtime_error("Error receiving frame");
         }
 
-        sws_scale(sws_ctx_, frame_->data, frame_->linesize, 0, frame_->height,
-                  gray_frame_->data, gray_frame_->linesize);
-        for (int y = 0; y < frame_->height; ++y) {
-            std::memcpy(gray_buffer_.data() + y * FRAME_WIDTH,
-                        gray_frame_->data[0] + y * gray_frame_->linesize[0],
-                        FRAME_WIDTH);
+        if (!is_gray8_) {
+            sws_scale(sws_ctx_, frame_->data, frame_->linesize, 0, frame_->height,
+                      gray_frame_->data, gray_frame_->linesize);
         }
 
         ++frame_index_;
