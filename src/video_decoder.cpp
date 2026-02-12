@@ -19,7 +19,10 @@
 #include "configuration.h"
 #include "dct_common.h"
 
+#include <algorithm>
+#include <array>
 #include <cstring>
+#include <span>
 #include <stdexcept>
 
 VideoDecoder::VideoDecoder(const std::string &input_path) {
@@ -181,17 +184,55 @@ std::vector<std::byte> VideoDecoder::extract_data_from_frame() const {
     return data;
 }
 
+std::size_t get_packet_size(const std::span<const std::byte> data) {
+    if (data.size() < 5) {
+        return HEADER_SIZE + SYMBOL_SIZE_BYTES;
+    }
+    const uint8_t version = static_cast<uint8_t>(data[4]);
+    return (version == VERSION_ID_V2) ? (HEADER_SIZE_V2 + SYMBOL_SIZE_BYTES)
+                                     : (HEADER_SIZE + SYMBOL_SIZE_BYTES);
+}
+
+namespace {
+constexpr std::array<std::byte, 4> MAGIC_BYTES{
+    static_cast<std::byte>(MAGIC_ID),
+    static_cast<std::byte>(MAGIC_ID >> 8),
+    static_cast<std::byte>(MAGIC_ID >> 16),
+    static_cast<std::byte>(MAGIC_ID >> 24),
+};
+}
+
+void VideoDecoder::extract_packets_from_buffer(std::vector<std::byte> &accumulated,
+                                                std::vector<std::vector<std::byte> > &out_packets) {
+    std::size_t offset = 0;
+    while (offset + 4 <= accumulated.size()) {
+        auto it = std::search(accumulated.begin() + static_cast<std::ptrdiff_t>(offset),
+                              accumulated.end(),
+                              MAGIC_BYTES.begin(), MAGIC_BYTES.end());
+        if (it == accumulated.end()) {
+            break;
+        }
+        offset = static_cast<std::size_t>(std::distance(accumulated.begin(), it));
+        const std::size_t packet_size = get_packet_size(
+            std::span<const std::byte>(accumulated.data() + offset,
+                                       accumulated.size() - offset));
+        if (offset + packet_size > accumulated.size()) {
+            break;
+        }
+        std::vector<std::byte> packet(
+            accumulated.begin() + static_cast<std::ptrdiff_t>(offset),
+            accumulated.begin() + static_cast<std::ptrdiff_t>(offset + packet_size));
+        out_packets.push_back(std::move(packet));
+        offset += packet_size;
+    }
+    accumulated.erase(accumulated.begin(),
+                     accumulated.begin() + static_cast<std::ptrdiff_t>(offset));
+}
+
 std::vector<std::vector<std::byte> > VideoDecoder::extract_packets_from_frame() const {
     const auto raw_data = extract_data_from_frame();
     std::vector<std::vector<std::byte> > packets;
-
-    std::size_t packet_size = HEADER_SIZE + SYMBOL_SIZE_BYTES;
-    if (raw_data.size() >= 5) {
-        const uint8_t version = static_cast<uint8_t>(raw_data[4]);
-        if (version == VERSION_ID_V2) {
-            packet_size = HEADER_SIZE_V2 + SYMBOL_SIZE_BYTES;
-        }
-    }
+    std::size_t packet_size = get_packet_size(std::span<const std::byte>(raw_data));
     packets.reserve(raw_data.size() / packet_size);
     std::size_t offset = 0;
     while (offset + packet_size <= raw_data.size()) {
@@ -202,14 +243,12 @@ std::vector<std::vector<std::byte> > VideoDecoder::extract_packets_from_frame() 
                 break;
             }
         }
-        std::vector packet(
+        std::vector<std::byte> packet(
             raw_data.begin() + static_cast<std::ptrdiff_t>(offset),
-            raw_data.begin() + static_cast<std::ptrdiff_t>(offset + packet_size)
-        );
+            raw_data.begin() + static_cast<std::ptrdiff_t>(offset + packet_size));
         packets.push_back(std::move(packet));
         offset += packet_size;
     }
-
     return packets;
 }
 
@@ -217,6 +256,15 @@ std::vector<std::vector<std::byte> > VideoDecoder::decode_next_frame() {
     if (eof_) {
         return {};
     }
+
+    auto process_frame = [this]() -> std::vector<std::vector<std::byte> > {
+        const auto raw_data = extract_data_from_frame();
+        extract_buffer_.insert(extract_buffer_.end(), raw_data.begin(), raw_data.end());
+        std::vector<std::vector<std::byte> > packets;
+        packets.reserve(extract_buffer_.size() / (HEADER_SIZE_V2 + SYMBOL_SIZE_BYTES));
+        extract_packets_from_buffer(extract_buffer_, packets);
+        return packets;
+    };
 
     while (av_read_frame(format_ctx_, av_packet_) >= 0) {
         if (av_packet_->stream_index != video_stream_index_) {
@@ -250,10 +298,39 @@ std::vector<std::vector<std::byte> > VideoDecoder::decode_next_frame() {
 
         ++frame_index_;
 
-        return extract_packets_from_frame();
+        return process_frame();
+    }
+
+    avcodec_send_packet(codec_ctx_, nullptr);
+    std::vector<std::vector<std::byte> > flushed_packets;
+    while (true) {
+        const int ret = avcodec_receive_frame(codec_ctx_, frame_);
+        if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+            break;
+        }
+        if (ret < 0) {
+            throw std::runtime_error("Error receiving frame");
+        }
+        if (!is_gray8_) {
+            sws_scale(sws_ctx_, frame_->data, frame_->linesize, 0, frame_->height,
+                      gray_frame_->data, gray_frame_->linesize);
+        }
+        ++frame_index_;
+        auto packets = process_frame();
+        for (auto &p : packets) {
+            flushed_packets.push_back(std::move(p));
+        }
     }
 
     eof_ = true;
+    if (!flushed_packets.empty()) {
+        return flushed_packets;
+    }
+    if (!extract_buffer_.empty()) {
+        std::vector<std::vector<std::byte> > packets;
+        extract_packets_from_buffer(extract_buffer_, packets);
+        return packets;
+    }
     return {};
 }
 
