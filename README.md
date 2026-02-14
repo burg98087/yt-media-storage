@@ -43,7 +43,7 @@ GUI. You may need to install some shared libraries (FFmpeg, Qt6, libsodium) to r
 sudo apt update
 sudo apt install cmake build-essential qt6-base-dev \
   libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
-  libsodium-dev libomp-dev
+  libsodium-dev libomp-dev ffmpeg
 ```
 
 ### Fedora/CentOS
@@ -148,6 +148,7 @@ This produces two executables:
 - **Cannot open input file**: Check file permissions and paths
 - **Encoding fails**: Ensure sufficient disk space for output video
 - **Decoding fails**: Verify the input file is a valid encoded video
+- **Encode Error: failed to write header**: Make sure you have at least FFMPEG version 8 in-order to use FFV1 encoder on mp4. Otherwise, use mkv instead.
 
 ## License
 
