@@ -1,12 +1,11 @@
 [![CodeFactor](https://www.codefactor.io/repository/github/pulsebeat02/yt-media-storage/badge)](https://www.codefactor.io/repository/github/pulsebeat02/yt-media-storage)
-[![TeamCity Full Build Status](https://img.shields.io/teamcity/build/s/YtMediaStorage_Build?server=https%3A%2F%2Fci.brandonli.me
-)](https://ci.brandonli.me/project/YtMediaStorage)
+[![TeamCity Full Build Status](https://img.shields.io/teamcity/build/s/YtMediaStorage_Build?server=https%3A%2F%2Fci.brandonli.me)](https://ci.brandonli.me/project/YtMediaStorage)
 
 # Media Storage
 
 [![Star History Chart](https://api.star-history.com/svg?repos=PulseBeat02/yt-media-storage&type=date&legend=top-left)](https://www.star-history.com/#PulseBeat02/yt-media-storage&type=date&legend=top-left)
 
-**Explanation Video**: https://youtu.be/l03Os5uwWmk?si=xgZPNMrvs_aDcWE5  
+**Explanation Video**: https://youtu.be/l03Os5uwWmk?si=xgZPNMrvs_aDcWE5
 **YC Hacker News**: https://news.ycombinator.com/item?id=47012964
 
 Stores files onto YouTube by encoding them into lossless video and decoding them back to the original file. Supports
@@ -43,7 +42,7 @@ GUI. You may need to install some shared libraries (FFmpeg, Qt6, libsodium) to r
 sudo apt update
 sudo apt install cmake build-essential qt6-base-dev \
   libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
-  libsodium-dev libomp-dev ffmpeg
+  libsodium-dev libomp-dev libgl1-mesa-dev ffmpeg 
 ```
 
 ### Fedora/CentOS
@@ -104,14 +103,15 @@ This produces two executables:
 #### Single File Operations
 
 1. **Encode a file to video**:
-    - Click "Browse..." next to "Input File" to select the file you want to encode
-    - Click "Browse..." next to "Output File" to choose where to save the video
-    - Click "Encode to Video" to start the process
 
+   - Click "Browse..." next to "Input File" to select the file you want to encode
+   - Click "Browse..." next to "Output File" to choose where to save the video
+   - Click "Encode to Video" to start the process
 2. **Decode a video to file**:
-    - Click "Browse..." next to "Input File" to select the video file
-    - Click "Browse..." next to "Output File" to choose where to save the decoded file
-    - Click "Decode from Video" to start the process
+
+   - Click "Browse..." next to "Input File" to select the video file
+   - Click "Browse..." next to "Output File" to choose where to save the decoded file
+   - Click "Decode from Video" to start the process
 
 #### Batch Operations
 
